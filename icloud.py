@@ -170,6 +170,7 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
         self._distance = None
         self._battery = None
         self._updating = False
+        self._overridestate = None
         
     @property
     def state(self):
@@ -271,10 +272,18 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
             except PyiCloudNoDevicesException:
                 _LOGGER.info('No iCloud Devices found!')
                 
+    def get_default_interval(self):
+        devid = 'device_tracker.' + self.devicename
+        devicestate = self.hass.states.get(devid)
+        self.devicechanged(self.devicename, None, devicestate)
+                
     def setinterval(self, interval=None):
         _LOGGER.info('iclouddevice %s: old interval %d',
                      self.devicename, self._interval)
         if interval is not None:
+            devid = 'device_tracker.' + self.devicename
+            devicestate = self.hass.states.get(devid)
+            self._overridestate = devicestate.state
             self._interval = interval
         else:
             self.get_default_interval()
@@ -286,7 +295,7 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
     def devicechanged(self, entity, old_state, new_state):
         if entity is None:
             return
-    
+            
         _LOGGER.info('iclouddevice %s: state %s', self.devicename, new_state.state)
         self._distance = None
         if 'latitude' in new_state.attributes:
@@ -301,6 +310,12 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
         self._battery = None
         if 'battery' in new_state.attributes:
             self._battery = new_state.attributes['battery']
+            
+        if new_state.state == self._overridestate:
+            self.update_ha_state()
+            return
+            
+        self._overridestate = None
         
         if new_state.state != 'not_home':
             self._interval = 30
