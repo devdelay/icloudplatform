@@ -307,7 +307,6 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
             self._distance = distance(device_state_lat, device_state_long,
                                       zone_state_lat, zone_state_long)
             self._distance = round(self._distance / 1000, 1)
-        self._battery = None
         if 'battery' in new_state.attributes:
             self._battery = new_state.attributes['battery']
             
