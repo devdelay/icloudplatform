@@ -90,7 +90,7 @@ def setup(hass, config):
                                    
         if 'manual_update' in account_config:
             def update_now(now):
-                ICLOUDTRACKERS[accountname].update_icloud(see)
+                ICLOUDTRACKERS[account].update_icloud(see)
                 _LOGGER.info("icloud %s device update_now called", account)
             
             manual_update = account_config.get('manual_update')
@@ -163,8 +163,7 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
         self.hass = hass
         self.icloudobject = icloudobject
         self.devicename = name
-        self._max_wait_seconds = 120
-        self._request_interval_seconds = 10
+        self._request_interval_seconds = 60
         self._interval = 1
         self.api = icloudobject.api
         self._distance = None
@@ -246,9 +245,7 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
                     dev_id = re.sub(r"(\s|\W|')", '', status['name']).lower()
                     if self.devicename == dev_id:
                         _LOGGER.info("iclouddevice %s start updating location", self.devicename)
-                        maxseconds = self._max_wait_seconds
-                        if self._interval == 1:
-                            maxseconds = 30
+                        maxseconds = 15 * self._interval
                         started = time.time()
                         while time.time() - started < maxseconds:
                             self._updating = True
