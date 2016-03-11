@@ -244,12 +244,21 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
                     status = device.status()
                     dev_id = re.sub(r"(\s|\W|')", '', status['name']).lower()
                     if self.devicename == dev_id:
+                        battery = status['batteryLevel']*100
+                        _LOGGER.info("iclouddevice %s battery %d", self.devicename, battery)
                         _LOGGER.info("iclouddevice %s start updating location", self.devicename)
                         maxseconds = 15 * self._interval
                         started = time.time()
                         while time.time() - started < maxseconds:
                             self._updating = True
                             location = device.location()
+                            _LOGGER.info("iclouddevice %s status %s location %s", self.devicename, status, location)
+                            if not battery:
+                                _LOGGER.info("iclouddevice %s battery not found", self.devicename)
+                                status = device.status()
+                                dev_id = re.sub(r"(\s|\W|')", '', status['name']).lower()
+                                battery = status['batteryLevel']*100
+                                _LOGGER.info("iclouddevice %s battery %d", self.devicename, battery)
                             if not location or self.data_is_accurate(location):
                                 break
                             time.sleep(self._request_interval_seconds)
@@ -262,7 +271,7 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
                                 host_name=status['name'],
                                 gps=(location['latitude'],
                                      location['longitude']),
-                                battery=status['batteryLevel']*100,
+                                battery=battery,
                                 gps_accuracy=location['horizontalAccuracy']
                             )
                         break
