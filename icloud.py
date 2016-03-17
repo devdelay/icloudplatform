@@ -8,10 +8,15 @@ https://home-assistant.io/components/icloud/
 """
 import logging
 import time as time
+from datetime import datetime, timezone, timedelta
+from pytz import timezone
+import pytz
+from math import floor
 
 import re
 from homeassistant.const import CONF_USERNAME, CONF_PASSWORD, CONF_NAME
 from homeassistant.helpers.entity import Entity
+from homeassistant.helpers.entity import generate_entity_id
 from homeassistant.components.device_tracker import see
 from homeassistant.helpers.event import track_state_change
 from homeassistant.helpers.event import track_time_change
@@ -22,12 +27,15 @@ from homeassistant.util.location import distance
 
 _LOGGER = logging.getLogger(__name__)
 
-REQUIREMENTS = ['pyicloud==0.7.2']
+REQUIREMENTS = ['pyicloud==0.8.1']
 
 DEPENDENCIES = ['zone', 'device_tracker']
 
 CONF_INTERVAL = 'interval'
 DEFAULT_INTERVAL = 8
+
+CONF_EVENTS = 'events'
+DEFAULT_EVENTS = False
 
 # entity attributes
 ATTR_ACCOUNTNAME = 'accountname'
@@ -35,11 +43,41 @@ ATTR_INTERVAL = 'interval'
 ATTR_DEVICENAME = 'devicename'
 ATTR_BATTERY = 'battery'
 ATTR_DISTANCE = 'distance'
+ATTR_STARTTIME = 'start time'
+ATTR_ENDTIME = 'end time'
+ATTR_DURATION = 'duration'
+ATTR_REMAINING = 'remaining time'
+ATTR_DEVICESTATUS = 'device status'
+ATTR_LOWPOWERMODE = 'low power mode'
+ATTR_BATTERYSTATUS = 'battery status'
+ATTR_LOCATION = 'location'
+ATTR_FRIENDLY_NAME = 'friendly_name'
+
+TYPE_CURRENT = 'currentevent'
+TYPE_NEXT = 'nextevent'
 
 ICLOUDTRACKERS = {}
 
 DOMAIN = 'icloud'
 DOMAIN2 = 'idevice'
+DOMAIN3 = 'ievent'
+
+ENTITY_ID_FORMAT_ICLOUD = DOMAIN + '.{}'
+ENTITY_ID_FORMAT_DEVICE = DOMAIN2 + '.{}'
+ENTITY_ID_FORMAT_EVENT = DOMAIN3 + '.{}'
+
+DEVICESTATUSSET = ['features', 'maxMsgChar', 'darkWake', 'fmlyShare',
+                   'deviceStatus', 'remoteLock', 'activationLocked',
+                   'deviceClass', 'id', 'deviceModel', 'rawDeviceModel',
+                   'passcodeLength', 'canWipeAfterLock', 'trackingInfo',
+                   'location', 'msg', 'batteryLevel', 'remoteWipe',
+                   'thisDevice', 'snd', 'prsId', 'wipeInProgress',
+                   'lowPowerMode', 'lostModeEnabled', 'isLocating',
+                   'lostModeCapable', 'mesg', 'name', 'batteryStatus',
+                   'lockedTimestamp', 'lostTimestamp', 'locationCapable',
+                   'deviceDisplayName', 'lostDevice', 'deviceColor',
+                   'wipedTimestamp', 'modelDisplayName', 'locationEnabled',
+                   'isMac', 'locFoundEnabled']
 
 
 def setup(hass, config):
@@ -73,9 +111,10 @@ def setup(hass, config):
                 ignored_devices.append(each_dev)
         _LOGGER.info("icloud %s ignored_devices %s", account, ignored_devices)
         
+        getevents = account_config.get(CONF_EVENTS, DEFAULT_EVENTS)
+        
         icloudaccount = Icloud(hass, username, password, account,
-                               ignored_devices)
-        icloudaccount.entity_id = DOMAIN + '.' + account
+                               ignored_devices, getevents)
         icloudaccount.update_ha_state()
         _LOGGER.info("icloud %s toegevoegd", account)
         ICLOUDTRACKERS[account] = icloudaccount
@@ -158,18 +197,26 @@ def setup(hass, config):
 
 class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
     """ Represents a Proximity in Home Assistant. """
-    def __init__(self, hass, icloudobject, name):
+    def __init__(self, hass, icloudobject, name, identifier):
         # pylint: disable=too-many-arguments
         self.hass = hass
         self.icloudobject = icloudobject
         self.devicename = name
+        self.identifier = identifier
         self._request_interval_seconds = 60
         self._interval = 1
         self.api = icloudobject.api
         self._distance = None
         self._battery = None
-        self._updating = False
         self._overridestate = None
+        self._devicestatuscode = None
+        self._devicestatus = None
+        self._lowPowerMode = None
+        self._batteryStatus = None
+        
+        self.entity_id = generate_entity_id(
+            ENTITY_ID_FORMAT_DEVICE, self.devicename,
+            hass=self.hass)
         
     @property
     def state(self):
@@ -187,14 +234,18 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
         return {
             ATTR_DEVICENAME: self.devicename,
             ATTR_BATTERY: self._battery,
-            ATTR_DISTANCE: self._distance
+            ATTR_DISTANCE: self._distance,
+            ATTR_DEVICESTATUS: self._devicestatus,
+            ATTR_LOWPOWERMODE: self._lowPowerMode,
+            ATTR_BATTERYSTATUS: self._batteryStatus
         }
         
     def keep_alive(self):
         """ Keeps the api alive """
         _LOGGER.info("iclouddevice %s keep alive called", self.devicename)
         currentminutes = dt_util.now().hour * 60 + dt_util.now().minute
-        if currentminutes % self._interval == 0:
+        maxminute = round(self._interval / 5, 0)
+        if currentminutes % self._interval <= maxminute:
             self.update_icloud(see)
 
     def lost_iphone(self):
@@ -202,11 +253,7 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
         _LOGGER.info("iclouddevice %s lost iphone called", self.devicename)
         if self.api is not None:
             self.api.authenticate()
-            for device in self.api.devices:
-                status = device.status()
-                dev_id = re.sub(r"(\s|\W|')", '', status['name']).lower()
-                if self.devicename == dev_id:
-                    device.play_sound()
+            self.identifier.play_sound()
 
     def data_is_accurate(self, data):
         if not data:
@@ -227,10 +274,6 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
     def update_icloud(self, see):
         """ Authenticate against iCloud and scan for devices. """        
         _LOGGER.info("iclouddevice %s update icloud called", self.devicename)
-        if self._updating:
-            _LOGGER.info("iclouddevice %s already updating", self.devicename)
-            return
-
         if self.api is not None:
             from pyicloud.exceptions import PyiCloudNoDevicesException
 
@@ -240,41 +283,40 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
                 self.api.authenticate()
                 _LOGGER.info("iclouddevice %s api authenticated", self.devicename)
                 # Loop through every device registered with the iCloud account
-                for device in self.api.devices:
-                    status = device.status()
-                    dev_id = re.sub(r"(\s|\W|')", '', status['name']).lower()
-                    if self.devicename == dev_id:
-                        battery = status['batteryLevel']*100
-                        _LOGGER.info("iclouddevice %s battery %d", self.devicename, battery)
-                        _LOGGER.info("iclouddevice %s start updating location", self.devicename)
-                        maxseconds = 15 * self._interval
-                        started = time.time()
-                        while time.time() - started < maxseconds:
-                            self._updating = True
-                            location = device.location()
-                            _LOGGER.info("iclouddevice %s status %s location %s", self.devicename, status, location)
-                            if not battery:
-                                _LOGGER.info("iclouddevice %s battery not found", self.devicename)
-                                status = device.status()
-                                dev_id = re.sub(r"(\s|\W|')", '', status['name']).lower()
-                                battery = status['batteryLevel']*100
-                                _LOGGER.info("iclouddevice %s battery %d", self.devicename, battery)
-                            if not location or self.data_is_accurate(location):
-                                break
-                            time.sleep(self._request_interval_seconds)
-                        self._updating = False
-                        if location:
-                            _LOGGER.info("iclouddevice %s update device tracker", self.devicename)
-                            see(
-                                hass=self.hass,
-                                dev_id=dev_id,
-                                host_name=status['name'],
-                                gps=(location['latitude'],
-                                     location['longitude']),
-                                battery=battery,
-                                gps_accuracy=location['horizontalAccuracy']
-                            )
-                        break
+                status = self.identifier.status(DEVICESTATUSSET)
+                _LOGGER.info("iclouddevice %s status %s", self.devicename, status)
+                dev_id = re.sub(r"(\s|\W|')", '',
+                                status['name']).lower()
+                self._devicestatuscode = status['deviceStatus']
+                if self._devicestatuscode == '200':
+                    self._devicestatus = 'online'
+                elif self._devicestatuscode == '201':
+                    self._devicestatus = 'offline'
+                elif self._devicestatuscode == '203':
+                    self._devicestatus = 'pending'
+                elif self._devicestatuscode == '204':
+                    self._devicestatus = 'unregistered'
+                else:
+                    self._devicestatus = 'error'
+                self._lowPowerMode = status['lowPowerMode']
+                self._batteryStatus = status['batteryStatus']
+                self.update_ha_state()
+                battery = status['batteryLevel']*100
+                _LOGGER.info("iclouddevice %s battery %d", self.devicename, battery)
+                _LOGGER.info("iclouddevice %s start updating location", self.devicename)
+                location = status['location']
+                _LOGGER.info("iclouddevice %s status %s location %s", self.devicename, status, location)
+                if location:
+                    _LOGGER.info("iclouddevice %s update device tracker", self.devicename)
+                    see(
+                        hass=self.hass,
+                        dev_id=dev_id,
+                        host_name=status['name'],
+                        gps=(location['latitude'],
+                             location['longitude']),
+                        battery=battery,
+                        gps_accuracy=location['horizontalAccuracy']
+                    )
             except PyiCloudNoDevicesException:
                 _LOGGER.info('No iCloud Devices found!')
                 
@@ -350,10 +392,189 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
         _LOGGER.info('iclouddevice %s: new interval %d',
                      self.devicename, self._interval)
 
+class IEvent(Entity):  # pylint: disable=too-many-instance-attributes
+    """ Represents a Proximity in Home Assistant. """
+    def __init__(self, hass, icloudobject, name, type=None):
+        # pylint: disable=too-many-arguments
+        self.hass = hass
+        self.icloudobject = icloudobject
+        self.api = icloudobject.api
+        self.eventguid = name
+        self._starttime = None
+        self._starttext = None
+        self._endtime = None
+        self._endtext = None
+        self._duration = None
+        self._title = None
+        self._remaining = 0
+        self._remainingtext = None
+        self._location = None
+        self._type = type
+        self._tz = None
+        
+        self.entity_id = generate_entity_id(
+            ENTITY_ID_FORMAT_EVENT, self.eventguid,
+            hass=self.hass)
+        
+    @property
+    def state(self):
+        """ returns the state of the icloud tracker """
+        return self._title
+        
+    @property
+    def state_attributes(self):
+        """ returns the friendlyname of the icloud tracker """
+        return {
+            ATTR_STARTTIME: self._starttext,
+            ATTR_ENDTIME: self._endtext,
+            ATTR_DURATION: self._duration,
+            ATTR_REMAINING: self._remainingtext,
+            ATTR_LOCATION: self._location,
+            ATTR_FRIENDLY_NAME: self._type
+        }
+        
+    def keep_alive(self, starttime, endtime, duration, title, tz, location):
+        """ Keeps the api alive """
+        _LOGGER.info("icloudevent %s keep alive called", self.eventguid)
+        current = self._type == TYPE_CURRENT
+        nextev = self._type == TYPE_NEXT
+        if current or nextev:
+            _LOGGER.info("icloudevent %s updating with %s ; %s ; %s ; %s", self.eventguid, starttime, endtime, duration, title)
+        self._remaining = 0
+        tempnow = dt_util.now(tz)
+        if tz is None:
+            self._tz = pytz.utc
+        else:
+            self._tz = tz
+        
+        if starttime is None:
+            self._starttime = None
+            self._starttext = None
+        else:
+            self._starttime = datetime(starttime[1], starttime[2],
+                                       starttime[3], starttime[4],
+                                       starttime[5], 0, 0, self._tz)
+            self._starttext = self._starttime.strftime("%A %d %B %Y %H.%M.%S")
+            if nextev:
+                self._remaining = self._starttime - tempnow
+                remainingdays = self._remaining.days
+                _LOGGER.info("icloudevent %s remainingdays %d", self.eventguid, remainingdays)
+                remainingseconds = (self._starttime.hour * 3600 +
+                                    self._starttime.minute * 60 +
+                                    self._starttime.second -
+                                    tempnow.hour * 3600 -
+                                    tempnow.minute * 60 -
+                                    tempnow.second)
+                if ((self._starttime.year > tempnow.year or
+                    self._starttime.month > tempnow.month or
+                    self._starttime.day > tempnow.day) and
+                    remainingseconds < 0):
+                    remainingseconds = 86400 + remainingseconds
+                _LOGGER.info("icloudevent %s remainingseconds %d", self.eventguid, remainingseconds)
+                self._remaining = (remainingdays * 1440 +
+                                   round(remainingseconds / 60, 0))
+        if endtime is None:
+            self._endtime = None
+            self._endtext = None
+        else:
+            self._endtime = datetime(endtime[1], endtime[2], endtime[3],
+                                     endtime[4], endtime[5], 0, 0,
+                                     self._tz)
+            self._endtext = self._endtime.strftime("%A %d %B %Y %H.%M.%S")
+            if current:
+                self._remaining = self._endtime - tempnow
+                remainingdays = self._remaining.days
+                remainingseconds = (self._endtime.hour * 3600 +
+                                    self._endtime.minute * 60 +
+                                    self._endtime.second -
+                                    tempnow.hour * 3600 -
+                                    tempnow.minute * 60 -
+                                    tempnow.second)
+                if ((self._endtime.year > tempnow.year or
+                    self._endtime.month > tempnow.month or
+                    self._endtime.day > tempnow.day) and
+                    remainingseconds < 0):
+                    remainingseconds = 86400 + remainingseconds
+                self._remaining = (remainingdays * 1440 +
+                                   round(remainingseconds / 60, 0))
+        self._duration = duration
+        self._title = title
+        if (current or nextev) and title is None:
+            self._title = 'Free'
+        self._location = location
+        
+        tempdays = floor(self._remaining / 1440)
+        temphours = floor((self._remaining % 1440) / 60)
+        tempminutes = floor(self._remaining % 60)
+        self._remainingtext = (str(tempdays) + "d " +
+                               str(temphours) + "h " +
+                               str(tempminutes) + "m")
+        
+        if self._remaining <= 0:
+            _LOGGER.info("event %s to be removed keep alive", self._title)
+            self.hass.states.remove(self.entity_id)
+        else:
+            self.update_ha_state()
+    
+    def check_alive(self):
+        """ Keeps the api alive """
+        _LOGGER.info("icloudevent %s check alive called", self.eventguid)
+        current = self._type == TYPE_CURRENT
+        nextev = self._type == TYPE_NEXT
+        self._remaining = 0
+        tempnow = dt_util.now(self._tz)
+        if self._starttime is not None:
+            if nextev:
+                self._remaining = self._starttime - tempnow
+                remainingdays = self._remaining.days
+                remainingseconds = (self._starttime.hour * 3600 +
+                                    self._starttime.minute * 60 +
+                                    self._starttime.second -
+                                    tempnow.hour * 3600 -
+                                    tempnow.minute * 60 -
+                                    tempnow.second)
+                if ((self._starttime.year > tempnow.year or
+                    self._starttime.month > tempnow.month or
+                    self._starttime.day > tempnow.day) and
+                    remainingseconds < 0):
+                    remainingseconds = 86400 + remainingseconds
+                self._remaining = (remainingdays * 1440 +
+                                   round(remainingseconds / 60, 0))
+        if self._endtime is not None:
+            if current:
+                self._remaining = self._endtime - tempnow
+                remainingdays = self._remaining.days
+                remainingseconds = (self._endtime.hour * 3600 +
+                                    self._endtime.minute * 60 +
+                                    self._endtime.second -
+                                    tempnow.hour * 3600 -
+                                    tempnow.minute * 60 -
+                                    tempnow.second)
+                if ((self._endtime.year > tempnow.year or
+                    self._endtime.month > tempnow.month or
+                    self._endtime.day > tempnow.day) and
+                    remainingseconds < 0):
+                    remainingseconds = 86400 + remainingseconds
+                self._remaining = (remainingdays * 1440 +
+                                   round(remainingseconds / 60, 0))
+                                   
+        tempdays = floor(self._remaining / 1440)
+        temphours = floor((self._remaining % 1440) / 60)
+        tempminutes = floor(self._remaining % 60)
+        self._remainingtext = (str(tempdays) + "d " +
+                               str(temphours) + "h " +
+                               str(tempminutes) + "m")
+
+        if self._remaining <= 0:
+            _LOGGER.info("event %s to be removed check alive", self._title)
+            self.hass.states.remove(self.entity_id)
+        else:
+            self.update_ha_state()
 
 class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
     """ Represents a Proximity in Home Assistant. """
-    def __init__(self, hass, username, password, name, ignored_devices):
+    def __init__(self, hass, username, password, name, ignored_devices,
+                 getevents):
         # pylint: disable=too-many-arguments
         from pyicloud import PyiCloudService
         from pyicloud.exceptions import PyiCloudFailedLoginException
@@ -367,7 +588,16 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
         self._interval = 1
         self.api = None
         self.devices = {}
+        self.getevents = getevents
+        self.events = {}
+        self.currentevents = {}
+        self.nextevents = {}
         self._ignored_devices = ignored_devices
+        self._ignored_identifiers = {}
+        
+        self.entity_id = generate_entity_id(
+            ENTITY_ID_FORMAT_ICLOUD, self.accountname,
+            hass=self.hass)
 
         if self.username is None or self.password is None:
             _LOGGER.error('Must specify a username and password')
@@ -378,18 +608,173 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 self.api = PyiCloudService(self.username,
                                            self.password,
                                            verify=True)
+                _LOGGER.info("////////////////////////////////////")
                 for device in self.api.devices:
-                    status = device.status()
+                    _LOGGER.info("icloud %s device %s", self.accountname, device)
+                    status = device.status(DEVICESTATUSSET)
                     devicename = re.sub(r"(\s|\W|')", '',
                                         status['name']).lower()
+                    _LOGGER.info("icloud %s device %s status %s", self.accountname, devicename, status)
                     _LOGGER.info("icloud %s device %s ignored_devices %s", self.accountname, devicename, self._ignored_devices)
                     if (devicename not in self.devices and
                         devicename not in self._ignored_devices):
-                        idevice = IDevice(self.hass, self, devicename)
-                        idevice.entity_id = DOMAIN2 + '.' + devicename
+                        idevice = IDevice(self.hass, self, devicename, device)
                         idevice.update_ha_state()
                         self.devices[devicename] = idevice
-                _LOGGER.info("icloud %s devices %s ignored_devices %s", self.accountname, self.devices, self._ignored_devices)
+                    elif devicename in self._ignored_devices:
+                        self._ignored_identifiers[devicename] = device
+                    
+                _LOGGER.info("////////////////////////////////////")
+                _LOGGER.info("icloud %s devices %s ignored_devices %s ignored_identifiers %s", self.accountname, self.devices, self._ignored_devices, self._ignored_identifiers)
+                if self.getevents:
+                    from_dt = dt_util.now()
+                    to_dt = from_dt + timedelta(days=7)
+                    events = self.api.calendar.events(from_dt, to_dt)
+                    _LOGGER.info('account %s events %s', self.accountname, events)
+                    # for event in events:
+                    #     _LOGGER.info('account %s event %s', self.accountname, event)
+                    #     eventguid = event['guid']
+                    #     if eventguid not in self.events:
+                    #         ievent = IEvent(self.hass, self, eventguid)
+                    #         ievent.update_ha_state()
+                    #         self.events[eventguid] = ievent
+                    #     starttime = event['startDate']
+                    #     endtime = event['endDate']
+                    #     duration = event['duration']
+                    #     title = event['title']
+                    #     tz = timezone(event['tz'])
+                    #     location = event['location']
+                    #     self.events[eventguid].keep_alive(starttime, endtime,
+                    #                                       duration, title, tz,
+                    #                                       location)
+                    starttime = None
+                    endtime = None
+                    duration = None
+                    title = None
+                    tz = pytz.utc
+                    location = None
+                    guid = None
+                    _LOGGER.info('********************************')
+                    for event in events:
+                        tz = timezone(event['tz'])
+                        tempnow = dt_util.now(tz)
+                        _LOGGER.info('event %s', event)
+                        guid = event['guid']
+                        starttime = event['startDate']
+                        startdate = datetime(starttime[1], starttime[2],
+                                             starttime[3], starttime[4],
+                                             starttime[5], 0, 0, tz)
+                        endtime = event['endDate']
+                        enddate = datetime(endtime[1], endtime[2], endtime[3],
+                                           endtime[4], endtime[5], 0, 0, tz)
+                        duration = event['duration']
+                        title = event['title']
+                        location = event['location']
+                        
+                        strnow = tempnow.strftime("%Y%m%d%H%M%S")
+                        strstart = startdate.strftime("%Y%m%d%H%M%S")
+                        strend = enddate.strftime("%Y%m%d%H%M%S")
+                        _LOGGER.info('%s %d now', strnow, tempnow.timestamp())
+                        _LOGGER.info('%s %d start', strstart, startdate.timestamp())
+                        _LOGGER.info('%s %d end', strend, enddate.timestamp())
+                        
+                        # if ((tempnow - startdate > timedelta(seconds=5)) and
+                        #     (enddate - tempnow > timedelta(seconds=5))):
+                        #     _LOGGER.info("event %s recognized with dates", event)
+                        #     ievent = IEvent(self.hass, self, guid,
+                        #                     TYPE_CURRENT)
+                        #     ievent.update_ha_state()
+                        #     self.currentevents[guid] = ievent
+                        #     self.currentevents[guid].keep_alive(starttime,
+                        #                                         endtime,
+                        #                                         duration,
+                        #                                         title,
+                        #                                         tz,
+                        #                                         location)
+                        # el
+                        if strnow > strstart and strend > strnow:
+                            _LOGGER.info("event %s recognized with strings", event)
+                            ievent = IEvent(self.hass, self, guid,
+                                            TYPE_CURRENT)
+                            ievent.update_ha_state()
+                            self.currentevents[guid] = ievent
+                            self.currentevents[guid].keep_alive(starttime,
+                                                                endtime,
+                                                                duration,
+                                                                title,
+                                                                tz,
+                                                                location)
+
+                        starttime = None
+                        endtime = None
+                        duration = None
+                        title = None
+                        tz = pytz.utc
+                        location = None
+                        guid = None
+                    _LOGGER.info('********************************')
+                    
+                    _LOGGER.info('--------------------------------')
+                    starttime = None
+                    endtime = None
+                    duration = None
+                    title = None
+                    tz = pytz.utc
+                    location = None
+                    guid = None
+                    for event in events:
+                        tz = timezone(event['tz'])
+                        tempnow = dt_util.now(tz)
+                        guid = event['guid']
+                        _LOGGER.info('event %s', event)
+                        starttime = event['startDate']
+                        startdate = datetime(starttime[1],
+                                             starttime[2],
+                                             starttime[3],
+                                             starttime[4],
+                                             starttime[5], 0, 0, tz)
+                        endtime = event['endDate']
+                        enddate = datetime(endtime[1], endtime[2],
+                                           endtime[3], endtime[4],
+                                           endtime[5], 0, 0, tz)
+                        duration = event['duration']
+                        title = event['title']
+                        location = event['location']
+                        
+                        strnow = tempnow.strftime("%Y%m%d%H%M%S")
+                        strstart = startdate.strftime("%Y%m%d%H%M%S")
+                        strend = enddate.strftime("%Y%m%d%H%M%S")
+                        _LOGGER.info('%s %d now', strnow, tempnow.timestamp())
+                        _LOGGER.info('%s %d start', strstart, startdate.timestamp())
+                        _LOGGER.info('%s %d end', strend, enddate.timestamp())
+                        
+                        # if tempnow - startdate > timedelta(seconds=5):
+                        #     _LOGGER.info("event %s recognized with dates", event)
+                        #     ievent = IEvent(self.hass, self, guid,
+                        #                     TYPE_NEXT)
+                        #     ievent.update_ha_state()
+                        #     self.nextevents[guid] = ievent
+                        #     self.nextevents[guid].keep_alive(starttime,
+                        #                                      endtime,
+                        #                                      duration,
+                        #                                      title,
+                        #                                      tz,
+                        #                                      location)
+                        # el
+                        if strnow < strstart:
+                            _LOGGER.info("event %s recognized with strings", event)
+                            ievent = IEvent(self.hass, self, guid,
+                                            TYPE_NEXT)
+                            ievent.update_ha_state()
+                            self.nextevents[guid] = ievent
+                            self.nextevents[guid].keep_alive(starttime,
+                                                             endtime,
+                                                             duration,
+                                                             title,
+                                                             tz,
+                                                             location)
+                    _LOGGER.info('--------------------------------')
+                        
             except PyiCloudFailedLoginException as error:
                 _LOGGER.exception('Error logging into iCloud Service: %s',
                                   error)
@@ -411,35 +796,215 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
         _LOGGER.info("icloud %s keep alive called", self.accountname)
         if self.api is not None:
             self.api.authenticate()
-            for device in self.api.devices:
-                status = device.status()
-                devicename = re.sub(r"(\s|\W|')", '', status['name']).lower()
-                if devicename not in self._ignored_devices:
-                    if devicename not in self.devices:
-                        idevice = IDevice(self.hass, self, devicename)
-                        idevice.entity_id = DOMAIN2 + '.' + devicename
-                        idevice.update_ha_state()
-                        self.devices[devicename] = idevice
-                    self.devices[devicename].keep_alive()
+            for devicename in self.devices:
+                self.devices[devicename].keep_alive()
+            if self.getevents:
+                from_dt = dt_util.now()
+                to_dt = from_dt + timedelta(days=7)
+                events = self.api.calendar.events(from_dt, to_dt)
+                # for event in events:
+                #     _LOGGER.info('account %s event %s', self.accountname, event)
+                #     eventguid = event['guid']
+                #     if eventguid not in self.events:
+                #         ievent = IEvent(self.hass, self, eventguid)
+                #         ievent.update_ha_state()
+                #         self.events[eventguid] = ievent
+                #     starttime = event['startDate']
+                #     endtime = event['endDate']
+                #     duration = event['duration']
+                #     title = event['title']
+                #     tz = timezone(event['tz'])
+                #     location = event['location']
+                #     self.events[eventguid].keep_alive(starttime, endtime,
+                #                                       duration, title, tz,
+                #                                       location)
+                # for addedevent in self.events:
+                #     found = False
+                #     for event in events:
+                #         if event['guid'] == self.events[addedevent].eventguid:
+                #             found = True
+                #     if not found:
+                #         eventguid = self.events[addedevent].eventguid
+                #         ent_id = generate_entity_id(ENTITY_ID_FORMAT_EVENT,
+                #                                     eventguid,
+                #                                     hass=self.hass)
+                #         self.hass.states.remove(ent_id)
+                starttime = None
+                endtime = None
+                duration = None
+                title = None
+                tz = pytz.utc
+                location = None
+                guid = None
+                _LOGGER.info('********************************')
+                for event in events:
+                    tz = timezone(event['tz'])
+                    tempnow = dt_util.now(tz)
+                    _LOGGER.info('event %s', event)
+                    guid = event['guid']
+                    starttime = event['startDate']
+                    startdate = datetime(starttime[1], starttime[2],
+                                         starttime[3], starttime[4],
+                                         starttime[5], 0, 0, tz)
+                    endtime = event['endDate']
+                    enddate = datetime(endtime[1], endtime[2], endtime[3],
+                                       endtime[4], endtime[5], 0, 0, tz)
+                    duration = event['duration']
+                    title = event['title']
+                    location = event['location']
+                        
+                    strnow = tempnow.strftime("%Y%m%d%H%M%S")
+                    strstart = startdate.strftime("%Y%m%d%H%M%S")
+                    strend = enddate.strftime("%Y%m%d%H%M%S")
+                    _LOGGER.info('%s %d now', strnow, tempnow.timestamp())
+                    _LOGGER.info('%s %d start', strstart, startdate.timestamp())
+                    _LOGGER.info('%s %d end', strend, enddate.timestamp())
+                        
+                    # if ((tempnow - startdate > timedelta(seconds=5)) and
+                    #     (enddate - tempnow > timedelta(seconds=5))):
+                    #     _LOGGER.info("event %s recognized with dates", event)
+                    #     if guid not in self.currentevents:
+                    #         ievent = IEvent(self.hass, self, guid,
+                    #                         TYPE_CURRENT)
+                    #         ievent.update_ha_state()
+                    #         self.currentevents[guid] = ievent
+                    #     self.currentevents[guid].keep_alive(starttime,
+                    #                                         endtime,
+                    #                                         duration,
+                    #                                         title,
+                    #                                         tz,
+                    #                                         location)
+                    # el
+                    if strnow > strstart and strend > strnow:
+                        _LOGGER.info("event %s recognized with strings", event)
+                        if guid not in self.currentevents:
+                            ievent = IEvent(self.hass, self, guid,
+                                            TYPE_CURRENT)
+                            ievent.update_ha_state()
+                            self.currentevents[guid] = ievent
+                        self.currentevents[guid].keep_alive(starttime,
+                                                            endtime,
+                                                            duration,
+                                                            title,
+                                                            tz,
+                                                            location)
+                    starttime = None
+                    endtime = None
+                    duration = None
+                    title = None
+                    tz = pytz.utc
+                    location = None
+                    guid = None
+                    
+                for addedevent in self.currentevents:
+                    found = False
+                    eventguid = self.currentevents[addedevent].eventguid
+                    for event in events:
+                        if event['guid'] == eventguid:
+                            found = True
+                    if not found:
+                        _LOGGER.info("event %s to be removed", self.currentevents[addedevent])
+                        ent_id = generate_entity_id(ENTITY_ID_FORMAT_EVENT,
+                                                    eventguid,
+                                                    hass=self.hass)
+                        self.hass.states.remove(ent_id)
+                        del self.currentevents[addedevent]
+                    else:
+                        self.currentevents[addedevent].check_alive()
+                _LOGGER.info('********************************')
+                
+                _LOGGER.info('--------------------------------')
+                starttime = None
+                endtime = None
+                duration = None
+                title = None
+                tz = pytz.utc
+                location = None
+                guid = None
+                for event in events:
+                    tz = timezone(event['tz'])
+                    tempnow = dt_util.now(tz)
+                    guid = event['guid']
+                    _LOGGER.info('event %s', event)
+                    starttime = event['startDate']
+                    startdate = datetime(starttime[1],
+                                         starttime[2],
+                                         starttime[3],
+                                         starttime[4],
+                                         starttime[5], 0, 0, tz)
+                    endtime = event['endDate']
+                    enddate = datetime(endtime[1], endtime[2],
+                                       endtime[3], endtime[4],
+                                       endtime[5], 0, 0, tz)
+                    duration = event['duration']
+                    title = event['title']
+                    location = event['location']
+                        
+                    strnow = tempnow.strftime("%Y%m%d%H%M%S")
+                    strstart = startdate.strftime("%Y%m%d%H%M%S")
+                    strend = enddate.strftime("%Y%m%d%H%M%S")
+                    _LOGGER.info('%s %d now', strnow, tempnow.timestamp())
+                    _LOGGER.info('%s %d start', strstart, startdate.timestamp())
+                    _LOGGER.info('%s %d end', strend, enddate.timestamp())
+                        
+                    # if tempnow - startdate > timedelta(seconds=5):
+                    #     _LOGGER.info("event %s recognized with dates", event)
+                    #     if guid not in self.nextevents:
+                    #         ievent = IEvent(self.hass, self, guid,
+                    #                         TYPE_NEXT)
+                    #         ievent.update_ha_state()
+                    #         self.nextevents[guid] = ievent
+                    #     self.nextevents[guid].keep_alive(starttime,
+                    #                                      endtime,
+                    #                                      duration,
+                    #                                      title,
+                    #                                      tz,
+                    #                                      location)
+                    # el
+                    if strnow < strstart:
+                        _LOGGER.info("event %s recognized with string", event)
+                        if guid not in self.nextevents:
+                            ievent = IEvent(self.hass, self, guid,
+                                            TYPE_NEXT)
+                            ievent.update_ha_state()
+                            self.nextevents[guid] = ievent
+                        self.nextevents[guid].keep_alive(starttime,
+                                                         endtime,
+                                                         duration,
+                                                         title,
+                                                         tz,
+                                                         location)
+                for addedevent in self.nextevents:
+                    found = False
+                    eventguid = self.nextevents[addedevent].eventguid
+                    for event in events:
+                        if event['guid'] == eventguid:
+                            found = True
+                    if not found:
+                        _LOGGER.info("event %s to be removed", self.nextevents[addedevent])
+                        ent_id = generate_entity_id(ENTITY_ID_FORMAT_EVENT,
+                                                    eventguid,
+                                                    hass=self.hass)
+                        self.hass.states.remove(ent_id)
+                        del self.nextevents[addedevent]
+                    else:
+                        self.nextevents[addedevent].check_alive()
+                _LOGGER.info('--------------------------------')
 
     def lost_iphone(self, devicename):
         """ Calls the lost iphone function if the device is found """
         _LOGGER.info("icloud %s keep alive called for device", self.accountname, devicename)
         if self.api is not None:
             self.api.authenticate()
-            for device in self.api.devices:
-                status = device.status()
-                devname = re.sub(r"(\s|\W|')", '', status['name']).lower()
-                if (devicename is not None and
-                    devicename not in self._ignored_devices):
-                    return
-                if devname not in self.devices:
-                    idevice = IDevice(self.hass, self, devname)
-                    idevice.entity_id = DOMAIN2 + '.' + devname
-                    idevice.update_ha_state()
-                    self.devices[devname] = idevice
-                if devicename is None or devicename == devname:
-                    self.devices[devname].play_sound()
+            if devicename is not None:
+                if devicename in self.devices:
+                    self.devices[devicename].play_sound()
+                else:
+                    _LOGGER.error("devicename %s unknown for account %s",
+                                  devicename, self.accountname)
+            else:
+                for device in self.devices:
+                    self.devices[device].play_sound()
 
     def update_icloud(self, see, devicename=None):
         """ Authenticate against iCloud and scan for devices. """
@@ -451,18 +1016,16 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 # The session timeouts if we are not using it so we
                 # have to re-authenticate. This will send an email.
                 self.api.authenticate()
-                # Loop through every device registered with the iCloud account
-                for device in self.api.devices:
-                    status = device.status()
-                    devname = re.sub(r"(\s|\W|')", '', status['name']).lower()
-                    if (devname not in self.devices and
-                        devicename not in self._ignored_devices):
-                        idevice = IDevice(self.hass, self, devname)
-                        idevice.entity_id = DOMAIN2 + '.' + devname
-                        idevice.update_ha_state()
-                        self.devices[devname] = idevice
-                    if devicename is None or devicename == devname:
-                        self.devices[devname].update_icloud(see)
+                if devicename is not None:
+                    if devicename in self.devices:
+                        self.devices[devicename].update_icloud(see)
+                    else:
+                        _LOGGER.error("devicename %s unknown for account %s",
+                                      devicename, self.accountname)
+                else:
+                    for device in self.devices:
+                        self.devices[device].update_icloud(see)
+                
             except PyiCloudNoDevicesException:
                 _LOGGER.info('No iCloud Devices found!')
                 

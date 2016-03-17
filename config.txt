@@ -10,6 +10,7 @@ icloud:
     ignored_devices:
       - iphonevanbvb
       - ipodvanbart
+    events: True
   sharon:
     username: <gf's username>
     password: <gf's password>
