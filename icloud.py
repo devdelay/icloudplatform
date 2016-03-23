@@ -656,7 +656,11 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                     guid = None
                     _LOGGER.info('********************************')
                     for event in events:
-                        tz = timezone(event['tz'])
+                        tz = event['tz']
+                        if tz is None:
+                            tz = pytz.utc
+                        else:
+                            tz = timezone(tz)
                         tempnow = dt_util.now(tz)
                         _LOGGER.info('event %s', event)
                         guid = event['guid']
@@ -723,7 +727,11 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                     location = None
                     guid = None
                     for event in events:
-                        tz = timezone(event['tz'])
+                        tz = event['tz']
+                        if tz is None:
+                            tz = pytz.utc
+                        else:
+                            tz = timezone(tz)
                         tempnow = dt_util.now(tz)
                         guid = event['guid']
                         _LOGGER.info('event %s', event)
@@ -838,7 +846,11 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 guid = None
                 _LOGGER.info('********************************')
                 for event in events:
-                    tz = timezone(event['tz'])
+                    tz = event['tz']
+                    if tz is None:
+                        tz = pytz.utc
+                    else:
+                        tz = timezone(tz)
                     tempnow = dt_util.now(tz)
                     _LOGGER.info('event %s', event)
                     guid = event['guid']
@@ -922,7 +934,11 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 location = None
                 guid = None
                 for event in events:
-                    tz = timezone(event['tz'])
+                    tz = event['tz']
+                    if tz is None:
+                        tz = pytz.utc
+                    else:
+                        tz = timezone(tz)
                     tempnow = dt_util.now(tz)
                     guid = event['guid']
                     _LOGGER.info('event %s', event)
