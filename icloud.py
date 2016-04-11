@@ -240,6 +240,11 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
             ATTR_BATTERYSTATUS: self._batteryStatus
         }
         
+    @property
+    def icon(self):
+        """Return the icon to use for device if any."""
+        return 'mdi:iphone'
+        
     def keep_alive(self):
         """ Keeps the api alive """
         _LOGGER.info("iclouddevice %s keep alive called", self.devicename)
@@ -432,6 +437,14 @@ class IEvent(Entity):  # pylint: disable=too-many-instance-attributes
             ATTR_LOCATION: self._location,
             ATTR_FRIENDLY_NAME: self._type
         }
+        
+    @property
+    def icon(self):
+        """Return the icon to use for device if any."""
+        if self._type == TYPE_CURRENT:
+            return 'mdi:calendar'
+        elif self._type == TYPE_NEXT:
+            return 'mdi:calendar-clock'
         
     def keep_alive(self, starttime, endtime, duration, title, tz, location):
         """ Keeps the api alive """
@@ -798,6 +811,11 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
         return {
             ATTR_ACCOUNTNAME: self.accountname
         }
+        
+    @property
+    def icon(self):
+        """Return the icon to use for device if any."""
+        return 'mdi:account'
         
     def keep_alive(self):
         """ Keeps the api alive """
