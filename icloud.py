@@ -243,7 +243,7 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
     @property
     def icon(self):
         """Return the icon to use for device if any."""
-        return 'mdi:iphone'
+        return 'mdi:cellphone-iphone'
         
     def keep_alive(self):
         """ Keeps the api alive """
