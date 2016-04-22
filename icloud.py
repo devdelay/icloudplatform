@@ -27,7 +27,7 @@ from homeassistant.util.location import distance
 
 _LOGGER = logging.getLogger(__name__)
 
-REQUIREMENTS = ['pyicloud==0.8.1']
+REQUIREMENTS = ['pyicloud==0.8.3']
 
 DEPENDENCIES = ['zone', 'device_tracker']
 
@@ -135,7 +135,7 @@ def setup(hass, config):
             manual_update = account_config.get('manual_update')
             for each_time in manual_update:
                 _LOGGER.info("icloud %s device manueel updaten om %s", account, each_time)
-                each_time = dt_util.parse_time_str(each_time)
+                each_time = dt_util.parse_time(each_time)
                 track_time_change(hass, update_now,
                                   hour=each_time.hour,
                                   minute=each_time.minute,
