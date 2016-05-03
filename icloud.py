@@ -12,6 +12,7 @@ from datetime import datetime, timezone, timedelta
 from pytz import timezone
 import pytz
 from math import floor
+import random
 
 from pyicloud import PyiCloudService
 from pyicloud.exceptions import PyiCloudFailedLoginException
@@ -143,6 +144,8 @@ def setup(hass, config):
         _LOGGER.error("No ICLOUDTRACKERS added")
         return False
         
+    randomseconds = random.randint(10, 59)
+        
     def lost_iphone(call):
         """ Calls the lost iphone function if the device is found """
         accountname = call.data.get('accountname')
@@ -165,11 +168,15 @@ def setup(hass, config):
     def keep_alive(now):
         """ Keeps the api logged in of all account """
         for accountname in ICLOUDTRACKERS:
-            ICLOUDTRACKERS[accountname].keep_alive()
+            try:
+                ICLOUDTRACKERS[accountname].keep_alive()
+            except ValueError:
+                _LOGGER.info("something went wrong for this account, " +
+                             "retrying in a minute")
             
     track_utc_time_change(
         hass, keep_alive,
-        second=0
+        second=randomseconds
     )
     
     def setinterval(call):
