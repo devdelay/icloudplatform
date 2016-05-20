@@ -274,9 +274,6 @@ class IDevice(Entity):  # pylint: disable=too-many-instance-attributes
             from pyicloud.exceptions import PyiCloudNoDevicesException
 
             try:
-                # The session timeouts if we are not using it so we
-                # have to re-authenticate. This will send an email.
-                self.api.authenticate()
                 # Loop through every device registered with the iCloud account
                 status = self.identifier.status(DEVICESTATUSSET)
                 dev_id = re.sub(r"(\s|\W|')", '',
@@ -599,6 +596,7 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                     from_dt = dt_util.now()
                     to_dt = from_dt + timedelta(days=7)
                     events = self.api.calendar.events(from_dt, to_dt)
+                    new_events = sorted(events.list_of_dict, key=operator.attrgetter('startDate'))
                     starttime = None
                     endtime = None
                     duration = None
@@ -606,7 +604,7 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                     tz = pytz.utc
                     location = None
                     guid = None
-                    for event in events:
+                    for event in new_events:
                         tz = event['tz']
                         if tz is None:
                             tz = pytz.utc
@@ -656,7 +654,7 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                     tz = pytz.utc
                     location = None
                     guid = None
-                    for event in events:
+                    for event in new_events:
                         tz = event['tz']
                         if tz is None:
                             tz = pytz.utc
@@ -737,6 +735,7 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 from_dt = dt_util.now()
                 to_dt = from_dt + timedelta(days=7)
                 events = self.api.calendar.events(from_dt, to_dt)
+                new_events = sorted(events.list_of_dict, key=operator.attrgetter('startDate'))
                 starttime = None
                 endtime = None
                 duration = None
@@ -744,7 +743,7 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 tz = pytz.utc
                 location = None
                 guid = None
-                for event in events:
+                for event in new_events:
                     tz = event['tz']
                     if tz is None:
                         tz = pytz.utc
@@ -790,7 +789,7 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 for addedevent in self.currentevents:
                     found = False
                     eventguid = self.currentevents[addedevent].eventguid
-                    for event in events:
+                    for event in new_events:
                         if event['guid'] == eventguid:
                             found = True
                     if not found:
@@ -809,7 +808,7 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 tz = pytz.utc
                 location = None
                 guid = None
-                for event in events:
+                for event in new_events:
                     tz = event['tz']
                     if tz is None:
                         tz = pytz.utc
@@ -850,7 +849,7 @@ class Icloud(Entity):  # pylint: disable=too-many-instance-attributes
                 for addedevent in self.nextevents:
                     found = False
                     eventguid = self.nextevents[addedevent].eventguid
-                    for event in events:
+                    for event in new_events:
                         if event['guid'] == eventguid:
                             found = True
                     if not found:
